@@ -33,8 +33,11 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
+import java.util.logging.Logger;
 import lombok.Getter;
 import lombok.Setter;
+import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.OfflinePlayer;
@@ -46,6 +49,8 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.scoreboard.Scoreboard;
+import org.bukkit.scoreboard.Team;
 import org.codehaus.jackson.annotate.JsonIgnore;
 
 public class Job implements Listener {
@@ -57,7 +62,6 @@ public class Job implements Listener {
     @Setter
     private String owner;
     @Getter
-    @Setter
     private boolean running;
     @Getter
     @Setter
@@ -125,9 +129,18 @@ public class Job implements Listener {
     @Getter
     @Setter
     private JobKit kit;
+    
+    private boolean glowing;
+    
+    private Team helperTeam;
+    private String helperTeamName;
+    private Team workerTeam;
+    private String workerTeamName;
+    private Scoreboard scoreboard;
+
     @Getter
     @JsonIgnore
-    private HashMap<OfflinePlayer, Long> left = new HashMap<>();
+    private HashMap<UUID, Long> left = new HashMap<>();
     public Job(String name, String description, String owner, boolean running, JobWarp warp, String world, boolean Private, int jr, 
                boolean discordSend, String[] discordTags, String ts, JobWarp tswarp) {
         this.name = name;
@@ -154,6 +167,22 @@ public class Job implements Listener {
         this.area = new Polygon(xbounds, zbounds, xbounds.length);
         this.bounds = area.getBounds2D();
         
+    }
+    
+    public void setGlowing() {
+        scoreboard = Bukkit.getScoreboardManager().getNewScoreboard();
+        helperTeamName = name+"Helper";
+        helperTeam = scoreboard.registerNewTeam(name+"Helper");
+        helperTeam.setColor(ChatColor.valueOf(TheGaffer.getHelperColor()));
+        //helperTeam.setOption(Team.Option.NAME_TAG_VISIBILITY, Team.OptionStatus.NEVER);
+        workerTeamName = name+"Worker";
+        workerTeam = scoreboard.registerNewTeam(name+"Worker");
+        workerTeam.setColor(ChatColor.valueOf(TheGaffer.getWorkerColor()));
+        //workerTeam.setOption(Team.Option.NAME_TAG_VISIBILITY, Team.OptionStatus.NEVER);
+
+        glowing = true;
+
+        addHelperTeam(owner);
     }
 
     public Job() {
@@ -313,6 +342,7 @@ public class Job implements Listener {
             return HelperResponse.NO_PERMISSIONS;
         }
         helpers.add(p.getName());
+        addHelperTeam(p.getName());
         VentureChatUtil.joinJobChannel(p.getUniqueId());
         setDirty(true);
         JobDatabase.saveJobs();
@@ -325,6 +355,7 @@ public class Job implements Listener {
             return HelperResponse.NOT_HELPER;
         }
         helpers.remove(p.getName());
+        removeHelperTeam(p.getName());
         VentureChatUtil.leaveJobChannel(p);
         setDirty(true);
         JobDatabase.saveJobs();
@@ -349,6 +380,7 @@ public class Job implements Listener {
             return WorkerResponse.NOT_INVITED;
         }
         workers.add(p.getName());
+        addWorkerTeam(p.getName());
         VentureChatUtil.joinJobChannel(p.getUniqueId());
         if (p.isOnline()) {
             p.getPlayer().teleport(warp.toBukkitLocation());
@@ -370,6 +402,7 @@ public class Job implements Listener {
             p.getPlayer().getInventory().clear();
         }
         workers.remove(p.getName());
+        removeWorkerTeam(p.getName());
         VentureChatUtil.leaveJobChannel(p);
         setDirty(true);
         JobDatabase.saveJobs();
@@ -406,6 +439,7 @@ public class Job implements Listener {
             }
             if (workers.contains(p.getName())) {
                 workers.remove(p.getName());
+                workerTeam.removeEntry(p.getName());
                 VentureChatUtil.leaveJobChannel(p);
             }
             invitedWorkers.remove(p.getName());
@@ -419,6 +453,7 @@ public class Job implements Listener {
         for(OfflinePlayer p : ps){
             if (workers.contains(p.getName())) {
                 workers.remove(p.getName());
+                removeWorkerTeam(p.getName());
                 VentureChatUtil.leaveJobChannel(p);
             }
             if (bannedWorkers.contains(p.getName())) {
@@ -449,6 +484,7 @@ public class Job implements Listener {
                 return KickWorkerResponse.NOT_IN_JOB;
             }
             workers.remove(p.getName());
+            removeWorkerTeam(p.getName());
             VentureChatUtil.leaveJobChannel(p);
             Util.debug(p.getName() + " was worker kicked from " + name + " with reason: " + reason);
         }
@@ -520,14 +556,24 @@ public class Job implements Listener {
             TheGaffer.scheduleOwnerTimeout(this);
         }
         if (workers.contains(event.getPlayer().getName())) {
-            left.put(event.getPlayer(), System.currentTimeMillis());
+            left.put(event.getPlayer().getUniqueId(), System.currentTimeMillis());
         }
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onJoin(PlayerJoinEvent event) {
-        if (left.containsKey(event.getPlayer())) {
-            left.remove(event.getPlayer());
+        if (left.containsKey(event.getPlayer().getUniqueId())) {
+            left.remove(event.getPlayer().getUniqueId());
+            if(glowing) {
+                event.getPlayer().setGlowing(true);
+                event.getPlayer().setScoreboard(scoreboard);
+            }
+        } else if(event.getPlayer().getName().equals(owner) 
+                || helpers.contains(event.getPlayer().getName())) {
+            if(glowing) {
+                event.getPlayer().setGlowing(true);
+                event.getPlayer().setScoreboard(scoreboard);
+            }
         }
     }
 
@@ -543,6 +589,63 @@ public class Job implements Listener {
         }
         for (Player player : getAllAsPlayersArray()) {
             player.sendMessage(chat[0] + prefix + message);
+        }
+    }
+    
+    public void setRunning(boolean running) {
+        this.running = running;
+        if(glowing && !running) {
+            helpers.forEach(helper -> removeHelperTeam(helper));
+            workers.forEach(worker -> removeWorkerTeam(worker));
+            removeHelperTeam(owner);
+            helperTeam.unregister();
+            workerTeam.unregister();
+        }
+    }
+    
+    private void addHelperTeam(String playerName) {
+        if(glowing) {
+Logger.getGlobal().info("add helper: "+playerName);
+            helperTeam.addEntry(playerName);
+            setGlow(playerName,true);
+        }
+    }
+    private void addWorkerTeam(String playerName) {
+        if(glowing) {
+Logger.getGlobal().info("add worker: "+playerName);
+            workerTeam.addEntry(playerName);
+            setGlow(playerName,true);
+        }
+    }
+    private void removeHelperTeam(String playerName) {
+        if(glowing) {
+Logger.getGlobal().info("remove helper: "+playerName);
+            helperTeam.removeEntry(playerName);
+            setGlow(playerName,false);
+        }
+    }
+    private void removeWorkerTeam(String playerName) {
+        if(glowing) {
+Logger.getGlobal().info("remove Worker: "+playerName);
+            workerTeam.removeEntry(playerName);
+            setGlow(playerName,false);
+        }
+    }
+    
+    private void setGlow(String playerName, boolean flag) {
+        Player player = Bukkit.getPlayer(playerName);
+        if(player!=null && glowing) {
+            player.setGlowing(flag);
+            if(flag) {
+                player.setScoreboard(scoreboard);
+            } else {
+                player.setScoreboard(Bukkit.getScoreboardManager().getMainScoreboard());
+            }
+            /*if(flag) {
+                player.addPotionEffect(new PotionEffect(PotionEffectType.GLOWING,10000,1));
+            } else {
+                player.removePotionEffect(PotionEffectType.GLOWING);
+            }*/
         }
     }
 }
